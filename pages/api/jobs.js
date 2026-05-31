@@ -11,6 +11,7 @@ export default async function handler(req, res) {
       "Content-Type": "application/json",
       "x-api-key": process.env.ANTHROPIC_API_KEY,
       "anthropic-version": "2023-06-01",
+      "anthropic-beta": "web-search-2025-03-05",
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
@@ -20,7 +21,7 @@ export default async function handler(req, res) {
         role: "user",
         content: `Today is ${today}. Search for 12 of the best, highest-paying ESL/EFL teaching jobs currently available. Mix remote, international, and domestic. Prioritize salaries above $20/hr or $45,000/yr. Include platforms like VIPKid, Preply, EPIK, British Council, international schools in UAE/Korea/Japan, US universities, and online EdTech companies.
 
-Return a JSON array of exactly 12 objects:
+Return a JSON array of exactly 12 objects with these fields:
 - id (1-12)
 - title
 - company
@@ -33,7 +34,7 @@ Return a JSON array of exactly 12 objects:
 - link (real URL if found, else "#")
 - hot (boolean)
 
-Return ONLY valid JSON array. No markdown. No extra text.`
+Return ONLY a valid JSON array. No markdown. No extra text.`
       }],
     }),
   });
