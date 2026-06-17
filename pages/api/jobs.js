@@ -127,4 +127,3 @@ Return ONLY valid JSON array. No markdown. No backticks. No explanation.`;
     return res.status(200).json({ jobs: [], debug: "Exception: " + err.message });
   }
 }
-
