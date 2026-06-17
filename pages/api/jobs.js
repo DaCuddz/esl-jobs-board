@@ -5,13 +5,13 @@ export default async function handler(req, res) {
   const isEnglish = langCode === "en";
 
   const prompt = isEnglish
-    ? `Today is ${today}. Search the web and find 12 of the best, highest-paying language career opportunities currently available. Include a broad mix: ESL/EFL teaching (online and abroad), business English coaching, translation, localization, corporate language training, IELTS/TOEFL prep, curriculum design, and bilingual professional roles. Prioritize salaries above $20/hr or $45,000/yr. Search platforms like VIPKid, Preply, iTalki, Cambly, Berlitz, EPIK Korea, British Council, Teach Away, international schools in UAE/Korea/Japan/Thailand/Jordan, US universities, and major EdTech companies. For every job, find the ACTUAL direct URL to the job listing or application page.
+    ? `Today is ${today}. Search the web and find 12 of the best, highest-paying language career opportunities currently available. Include a broad mix: ESL/EFL teaching (online and abroad), business English coaching, translation, localization, corporate language training, IELTS/TOEFL prep, curriculum design, and bilingual professional roles. Prioritize salaries above $20/hr or $45,000/yr. Search platforms like VIPKid, Preply, iTalki, Cambly, Berlitz, EPIK Korea, British Council, Teach Away, international schools in UAE/Korea/Japan/Thailand/Jordan, US universities, and major EdTech companies. For every job find the ACTUAL direct URL to the job listing or application page.
 
 Return a JSON array of exactly 12 objects with these exact fields:
 - id (1-12)
 - title (job title)
 - company (real company name)
-- companyBlurred (company name with middle letters replaced by ████ e.g. "Pre███ Business")
+- companyBlurred (company name with middle letters replaced by █ characters e.g. "Pre███ Business")
 - location (city/country or "Remote")
 - salary (e.g. "$25-35/hr" or "$50,000/yr")
 - type (one of: "Full-time", "Part-time", "Contract", "Freelance")
@@ -25,11 +25,11 @@ Return a JSON array of exactly 12 objects with these exact fields:
 Return ONLY a valid JSON array. No markdown. No backticks. No explanation. No extra text.`
     : `Today is ${today}. Search the web for the best paying jobs and career opportunities that require or involve the ${language} language. Include: ${language} teaching jobs (online and in-person), translation work, localization roles, corporate ${language} language training, interpreter positions, ${language} content creation, and any professional role where ${language} fluency is a key requirement. Search globally across job boards, company career pages, and language teaching platforms.
 
-Return a JSON array of up to 12 objects (fewer if fewer quality results exist, return [] if none found). Each object must have:
+Return a JSON array of up to 12 objects (fewer if fewer quality results exist, return [] if truly none found). Each object must have:
 - id (sequential from 1)
 - title
 - company (real company name)
-- companyBlurred (company name with middle letters replaced by ████)
+- companyBlurred (company name with middle letters replaced by █ characters)
 - location (city/country or "Remote")
 - salary (formatted string, or "Competitive" if unavailable)
 - type (one of: "Full-time", "Part-time", "Contract", "Freelance")
@@ -43,54 +43,54 @@ Return a JSON array of up to 12 objects (fewer if fewer quality results exist, r
 Return ONLY valid JSON array. No markdown. No backticks. No explanation.`;
 
   try {
-    const apiRes = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "anthropic-beta": "web-search-2025-03-05",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-5-20250929",
-        max_tokens: 4000,
-        tools: [{
-          type: "web_search_20250305",
-          name: "web_search",
-          max_uses: 8,
-        }],
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
+    const apiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          tools: [{ google_search: {} }],
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 4000,
+          },
+        }),
+      }
+    );
 
     const rawText = await apiRes.text();
 
     if (!apiRes.ok) {
-      console.error("Anthropic API HTTP error:", apiRes.status, rawText.slice(0, 400));
-      return res.status(200).json({ jobs: [], debug: `HTTP ${apiRes.status}: ${rawText.slice(0, 200)}` });
+      console.error("Gemini API error:", apiRes.status, rawText.slice(0, 400));
+      return res.status(200).json({ jobs: [], debug: `Gemini HTTP ${apiRes.status}: ${rawText.slice(0, 300)}` });
     }
 
     let data;
     try { data = JSON.parse(rawText); }
-    catch (e) { return res.status(200).json({ jobs: [], debug: "Failed to parse API response: " + rawText.slice(0, 200) }); }
+    catch (e) { return res.status(200).json({ jobs: [], debug: "Failed to parse Gemini response" }); }
 
-    if (data.error) {
-      console.error("Anthropic error:", data.error);
-      return res.status(200).json({ jobs: [], debug: data.error.message });
+    // Extract text from Gemini response structure
+    const fullText = data?.candidates?.[0]?.content?.parts
+      ?.map(p => p.text || "")
+      .join("\n") || "";
+
+    if (!fullText) {
+      console.error("Empty Gemini response:", JSON.stringify(data).slice(0, 400));
+      return res.status(200).json({ jobs: [], debug: "Empty response from Gemini", raw: JSON.stringify(data).slice(0, 300) });
     }
 
-    const fullText = (data.content || [])
-      .map(b => b.type === "text" ? b.text : "")
-      .filter(Boolean)
-      .join("\n");
+    // Strip markdown code fences
+    const stripped = fullText
+      .replace(/```json\s*/gi, "")
+      .replace(/```\s*/g, "")
+      .trim();
 
-    // Strip markdown code fences if present
-    const stripped = fullText.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
     const match = stripped.match(/\[[\s\S]*\]/);
 
     if (!match) {
-      console.error("No JSON array found. Response was:", fullText.slice(0, 500));
-      return res.status(200).json({ jobs: [], debug: "No JSON array in response", preview: fullText.slice(0, 300) });
+      console.error("No JSON array in Gemini response:", fullText.slice(0, 500));
+      return res.status(200).json({ jobs: [], debug: "No JSON array found", preview: fullText.slice(0, 300) });
     }
 
     let jobs;
