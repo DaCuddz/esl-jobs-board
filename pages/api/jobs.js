@@ -1,50 +1,110 @@
+import { z } from "zod";
+import { Redis } from "@upstash/redis";
+
+// ─── ZOD SCHEMA ──────────────────────────────────────────────────────────────
+const JobSchema = z.object({
+  id:             z.number(),
+  title:          z.string(),
+  company:        z.string(),
+  companyBlurred: z.string(),
+  location:       z.string(),
+  salary:         z.string(),
+  type:           z.string(),
+  tag:            z.string(),
+  description:    z.string(),
+  requirements:   z.array(z.string()).max(3),
+  link:           z.string().url(),
+  featured:       z.boolean(),
+  hiddenGem:      z.boolean(),
+});
+
+const JobsArraySchema = z.array(JobSchema);
+
+// ─── GEMINI RESPONSE SCHEMA ──────────────────────────────────────────────────
+const responseSchema = {
+  type: "ARRAY",
+  items: {
+    type: "OBJECT",
+    properties: {
+      id:             { type: "NUMBER" },
+      title:          { type: "STRING" },
+      company:        { type: "STRING" },
+      companyBlurred: { type: "STRING" },
+      location:       { type: "STRING" },
+      salary:         { type: "STRING" },
+      type:           { type: "STRING" },
+      tag:            { type: "STRING" },
+      description:    { type: "STRING" },
+      requirements:   { type: "ARRAY", items: { type: "STRING" } },
+      link:           { type: "STRING" },
+      featured:       { type: "BOOLEAN" },
+      hiddenGem:      { type: "BOOLEAN" },
+    },
+    required: ["id","title","company","companyBlurred","location","salary","type","tag","description","requirements","link","featured","hiddenGem"],
+  },
+};
+
+// ─── REDIS CLIENT ─────────────────────────────────────────────────────────────
+let redis;
+try {
+  redis = new Redis({
+    url: process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN,
+  });
+} catch {
+  redis = null;
+}
+
+// ─── CACHE HELPERS ───────────────────────────────────────────────────────────
+function getCacheKey(langCode) {
+  const date = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+  return `esljd:jobs:${langCode}:${date}`;
+}
+
+async function getFromCache(key) {
+  if (!redis) return null;
+  try {
+    const cached = await redis.get(key);
+    return cached || null;
+  } catch { return null; }
+}
+
+async function setInCache(key, data) {
+  if (!redis) return;
+  try {
+    // Cache until end of day — 20 hours
+    await redis.setex(key, 72000, JSON.stringify(data));
+  } catch { /* cache write failure is non-fatal */ }
+}
+
+// ─── MAIN HANDLER ────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
-  const { language = "English", langCode = "en", today } = req.body || {};
+  const { language = "English", langCode = "en", today = new Date().toDateString() } = req.body || {};
+
+  // 1. Check Redis cache first
+  const cacheKey = getCacheKey(langCode);
+  const cached = await getFromCache(cacheKey);
+
+  if (cached) {
+    console.log(`Cache hit for ${langCode}`);
+    res.setHeader("X-Cache", "HIT");
+    res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
+    return res.status(200).json({ jobs: JSON.parse(cached), fromCache: true });
+  }
+
+  console.log(`Cache miss for ${langCode} — calling Gemini`);
+
   const isEnglish = langCode === "en";
 
   const prompt = isEnglish
-    ? `Today is ${today}. Search the web and find 12 of the best, highest-paying language career opportunities currently available. Include a broad mix: ESL/EFL teaching (online and abroad), business English coaching, translation, localization, corporate language training, IELTS/TOEFL prep, curriculum design, and bilingual professional roles. Prioritize salaries above $20/hr or $45,000/yr. Search platforms like VIPKid, Preply, iTalki, Cambly, Berlitz, EPIK Korea, British Council, Teach Away, international schools in UAE/Korea/Japan/Thailand/Jordan, US universities, and major EdTech companies. For every job find the ACTUAL direct URL to the job listing or application page.
-
-Return a JSON array of exactly 12 objects with these exact fields:
-- id (1-12)
-- title (job title)
-- company (real company name)
-- companyBlurred (company name with middle letters replaced by █ characters e.g. "Pre███ Business")
-- location (city/country or "Remote")
-- salary (e.g. "$25-35/hr" or "$50,000/yr")
-- type (one of: "Full-time", "Part-time", "Contract", "Freelance")
-- tag (one of: "Editor's Choice", "Premium Pick", "Rare Find", "Featured", "Recommended", "Fast Filling")
-- description (exactly 2 compelling sentences)
-- requirements (array of exactly 3 strings)
-- link (REAL working URL to the actual job or apply page)
-- featured (boolean, true if salary is very competitive)
-- hiddenGem (boolean, true for exactly ONE job only)
-
-Return ONLY a valid JSON array. No markdown. No backticks. No explanation. No extra text.`
-    : `Today is ${today}. Search the web for the best paying jobs and career opportunities that require or involve the ${language} language. Include: ${language} teaching jobs (online and in-person), translation work, localization roles, corporate ${language} language training, interpreter positions, ${language} content creation, and any professional role where ${language} fluency is a key requirement. Search globally across job boards, company career pages, and language teaching platforms.
-
-Return a JSON array of up to 12 objects (fewer if fewer quality results exist, return [] if truly none found). Each object must have:
-- id (sequential from 1)
-- title
-- company (real company name)
-- companyBlurred (company name with middle letters replaced by █ characters)
-- location (city/country or "Remote")
-- salary (formatted string, or "Competitive" if unavailable)
-- type (one of: "Full-time", "Part-time", "Contract", "Freelance")
-- tag (one of: "Editor's Choice", "Premium Pick", "Rare Find", "Featured", "Recommended", "Fast Filling")
-- description (exactly 2 sentences)
-- requirements (array of exactly 3 strings)
-- link (REAL working URL to the job listing)
-- featured (boolean)
-- hiddenGem (boolean, true for at most ONE job)
-
-Return ONLY valid JSON array. No markdown. No backticks. No explanation.`;
+    ? `Today is ${today}. Search the web and find 12 of the best highest-paying language career opportunities currently available. Include a broad mix: ESL/EFL teaching online and abroad, business English coaching, translation, localization, corporate language training, IELTS/TOEFL prep, curriculum design, and bilingual professional roles. Prioritize salaries above $20/hr or $45000/yr. Search VIPKid, Preply, iTalki, Cambly, Berlitz, EPIK Korea, British Council, Teach Away, international schools in UAE Korea Japan Thailand Jordan, US universities, and major EdTech companies. For every job find the ACTUAL direct URL to the listing. For companyBlurred replace middle letters with █ e.g. Pre███ for Preply. Set hiddenGem true for exactly ONE job only. Return exactly 12 jobs.`
+    : `Today is ${today}. Search the web for the best paying jobs requiring ${language} language skills. Include ${language} teaching, translation, localization, corporate training, interpretation, content creation, and bilingual roles. Search globally. For every job find the actual direct URL. For companyBlurred replace middle letters with █. Set hiddenGem true for at most ONE job. If no legitimate ${language} jobs exist, return an empty array.`;
 
   try {
     const apiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -52,6 +112,8 @@ Return ONLY valid JSON array. No markdown. No backticks. No explanation.`;
           contents: [{ parts: [{ text: prompt }] }],
           tools: [{ google_search: {} }],
           generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema,
             temperature: 0.7,
             maxOutputTokens: 4000,
           },
@@ -62,68 +124,66 @@ Return ONLY valid JSON array. No markdown. No backticks. No explanation.`;
     const rawText = await apiRes.text();
 
     if (!apiRes.ok) {
-      console.error("Gemini API error:", apiRes.status, rawText.slice(0, 400));
-      return res.status(200).json({ jobs: [], debug: `Gemini HTTP ${apiRes.status}: ${rawText.slice(0, 300)}` });
+      console.error("Gemini HTTP error:", apiRes.status, rawText.slice(0, 400));
+      return res.status(502).json({ jobs: [], debug: `Gemini HTTP ${apiRes.status}: ${rawText.slice(0, 300)}` });
     }
 
     let data;
     try { data = JSON.parse(rawText); }
-    catch (e) { return res.status(200).json({ jobs: [], debug: "Failed to parse Gemini response" }); }
+    catch { return res.status(502).json({ jobs: [], debug: "Failed to parse Gemini response" }); }
 
-    // Extract text from Gemini response structure
-    const fullText = data?.candidates?.[0]?.content?.parts
-      ?.map(p => p.text || "")
-      .join("\n") || "";
-
-    if (!fullText) {
-      console.error("Empty Gemini response:", JSON.stringify(data).slice(0, 400));
-      return res.status(200).json({ jobs: [], debug: "Empty response from Gemini", raw: JSON.stringify(data).slice(0, 300) });
+    const jsonText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!jsonText) {
+      console.error("No text in Gemini response:", JSON.stringify(data).slice(0, 300));
+      return res.status(502).json({ jobs: [], debug: "Empty Gemini response" });
     }
 
-    // Strip markdown code fences
-    const stripped = fullText
-      .replace(/```json\s*/gi, "")
-      .replace(/```\s*/g, "")
-      .trim();
+    let rawJobs;
+    try { rawJobs = JSON.parse(jsonText); }
+    catch (e) { return res.status(422).json({ jobs: [], debug: "JSON parse error: " + e.message }); }
 
-    const match = stripped.match(/\[[\s\S]*\]/);
-
-    if (!match) {
-      console.error("No JSON array in Gemini response:", fullText.slice(0, 500));
-      return res.status(200).json({ jobs: [], debug: "No JSON array found", preview: fullText.slice(0, 300) });
-    }
+    // 2. Zod validation
+    const result = JobsArraySchema.safeParse(rawJobs);
 
     let jobs;
-    try { jobs = JSON.parse(match[0]); }
-    catch (e) { return res.status(200).json({ jobs: [], debug: "JSON parse error: " + e.message }); }
-
-    if (!Array.isArray(jobs)) {
-      return res.status(200).json({ jobs: [], debug: "Response was not an array" });
+    if (result.success) {
+      jobs = result.data;
+      console.log(`Zod validation passed — ${jobs.length} jobs`);
+    } else {
+      // Zod failed — clean and remap manually as fallback
+      console.warn("Zod validation failed, cleaning manually:", result.error.issues.slice(0, 3));
+      jobs = (Array.isArray(rawJobs) ? rawJobs : [])
+        .filter(j => j && j.title && j.link)
+        .map((j, i) => ({
+          id: i + 1,
+          title: String(j.title || ""),
+          company: String(j.company || ""),
+          companyBlurred: String(j.companyBlurred || j.company || ""),
+          location: String(j.location || "Remote"),
+          salary: String(j.salary || "Competitive"),
+          type: String(j.type || "Full-time"),
+          tag: String(j.tag || "Featured"),
+          description: String(j.description || ""),
+          requirements: Array.isArray(j.requirements) ? j.requirements.slice(0, 3).map(String) : [],
+          link: String(j.link || "#"),
+          featured: Boolean(j.featured),
+          hiddenGem: Boolean(j.hiddenGem),
+        }));
     }
 
-    const cleaned = jobs
-      .filter(j => j && j.title && j.link)
-      .map((j, i) => ({
-        id: i + 1,
-        title: String(j.title || ""),
-        company: String(j.company || ""),
-        companyBlurred: String(j.companyBlurred || j.company || ""),
-        location: String(j.location || "Remote"),
-        salary: String(j.salary || "Competitive"),
-        type: String(j.type || "Full-time"),
-        tag: String(j.tag || "Featured"),
-        description: String(j.description || ""),
-        requirements: Array.isArray(j.requirements) ? j.requirements.slice(0, 3).map(String) : [],
-        link: String(j.link || "#"),
-        featured: Boolean(j.featured),
-        hiddenGem: Boolean(j.hiddenGem),
-      }));
+    if (jobs.length === 0) {
+      return res.status(200).json({ jobs: [] });
+    }
 
+    // 3. Store in Redis cache
+    await setInCache(cacheKey, jobs);
+
+    res.setHeader("X-Cache", "MISS");
     res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
-    return res.status(200).json({ jobs: cleaned });
+    return res.status(200).json({ jobs });
 
   } catch (err) {
     console.error("Handler exception:", err);
-    return res.status(200).json({ jobs: [], debug: "Exception: " + err.message });
+    return res.status(500).json({ jobs: [], debug: "Exception: " + err.message });
   }
 }
