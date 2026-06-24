@@ -1,50 +1,24 @@
 import { z } from "zod";
 import { Redis } from "@upstash/redis";
 
-// ─── ZOD SCHEMA ──────────────────────────────────────────────────────────────
 const JobSchema = z.object({
   id:             z.number(),
-  title:          z.string(),
-  company:        z.string(),
-  companyBlurred: z.string(),
-  location:       z.string(),
-  salary:         z.string(),
-  type:           z.string(),
-  tag:            z.string(),
-  description:    z.string(),
-  requirements:   z.array(z.string()).max(3),
-  link:           z.string().url(),
+  title:          z.string().min(1),
+  company:        z.string().min(1),
+  companyBlurred: z.string().min(1),
+  location:       z.string().min(1),
+  salary:         z.string().min(1),
+  type:           z.string().min(1),
+  tag:            z.string().min(1),
+  description:    z.string().min(1),
+  requirements:   z.array(z.string()).min(1).max(3),
+  link:           z.string().min(1),
   featured:       z.boolean(),
   hiddenGem:      z.boolean(),
 });
 
 const JobsArraySchema = z.array(JobSchema);
 
-// ─── GEMINI RESPONSE SCHEMA ──────────────────────────────────────────────────
-const responseSchema = {
-  type: "ARRAY",
-  items: {
-    type: "OBJECT",
-    properties: {
-      id:             { type: "NUMBER" },
-      title:          { type: "STRING" },
-      company:        { type: "STRING" },
-      companyBlurred: { type: "STRING" },
-      location:       { type: "STRING" },
-      salary:         { type: "STRING" },
-      type:           { type: "STRING" },
-      tag:            { type: "STRING" },
-      description:    { type: "STRING" },
-      requirements:   { type: "ARRAY", items: { type: "STRING" } },
-      link:           { type: "STRING" },
-      featured:       { type: "BOOLEAN" },
-      hiddenGem:      { type: "BOOLEAN" },
-    },
-    required: ["id","title","company","companyBlurred","location","salary","type","tag","description","requirements","link","featured","hiddenGem"],
-  },
-};
-
-// ─── REDIS CLIENT ─────────────────────────────────────────────────────────────
 let redis;
 try {
   redis = new Redis({
@@ -55,9 +29,8 @@ try {
   redis = null;
 }
 
-// ─── CACHE HELPERS ───────────────────────────────────────────────────────────
 function getCacheKey(langCode) {
-  const date = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+  const date = new Date().toISOString().split("T")[0];
   return `esljd:jobs:${langCode}:${date}`;
 }
 
@@ -72,26 +45,22 @@ async function getFromCache(key) {
 async function setInCache(key, data) {
   if (!redis) return;
   try {
-    // Cache until end of day — 20 hours
     await redis.setex(key, 72000, JSON.stringify(data));
-  } catch { /* cache write failure is non-fatal */ }
+  } catch {}
 }
 
-// ─── MAIN HANDLER ────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
   const { language = "English", langCode = "en", today = new Date().toDateString() } = req.body || {};
 
-  // 1. Check Redis cache first
   const cacheKey = getCacheKey(langCode);
   const cached = await getFromCache(cacheKey);
 
   if (cached) {
     console.log(`Cache hit for ${langCode}`);
     res.setHeader("X-Cache", "HIT");
-    res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
-    return res.status(200).json({ jobs: JSON.parse(cached), fromCache: true });
+    return res.status(200).json({ jobs: typeof cached === "string" ? JSON.parse(cached) : cached, fromCache: true });
   }
 
   console.log(`Cache miss for ${langCode} — calling Gemini`);
@@ -99,10 +68,45 @@ export default async function handler(req, res) {
   const isEnglish = langCode === "en";
 
   const prompt = isEnglish
-    ? `Today is ${today}. Search the web and find 12 of the best highest-paying language career opportunities currently available. Include a broad mix: ESL/EFL teaching online and abroad, business English coaching, translation, localization, corporate language training, IELTS/TOEFL prep, curriculum design, and bilingual professional roles. Prioritize salaries above $20/hr or $45000/yr. Search VIPKid, Preply, iTalki, Cambly, Berlitz, EPIK Korea, British Council, Teach Away, international schools in UAE Korea Japan Thailand Jordan, US universities, and major EdTech companies. For every job find the ACTUAL direct URL to the listing. For companyBlurred replace middle letters with █ e.g. Pre███ for Preply. Set hiddenGem true for exactly ONE job only. Return exactly 12 jobs.`
-    : `Today is ${today}. Search the web for the best paying jobs requiring ${language} language skills. Include ${language} teaching, translation, localization, corporate training, interpretation, content creation, and bilingual roles. Search globally. For every job find the actual direct URL. For companyBlurred replace middle letters with █. Set hiddenGem true for at most ONE job. If no legitimate ${language} jobs exist, return an empty array.`;
+    ? `Today is ${today}. Search the web and find 12 of the best highest-paying language career opportunities currently available. Include ESL/EFL teaching online and abroad, business English coaching, translation, localization, corporate language training, IELTS/TOEFL prep, curriculum design, and bilingual professional roles. Prioritize salaries above $20/hr or $45000/yr. Search VIPKid, Preply, iTalki, Cambly, Berlitz, EPIK Korea, British Council, Teach Away, international schools in UAE Korea Japan Thailand Jordan, US universities, and major EdTech companies. For every job find the ACTUAL direct URL to the listing. For companyBlurred replace middle letters with the unicode block character █.
+
+You MUST return a valid JSON array of exactly 12 job objects. Each object must have these exact fields:
+- id: number (1-12)
+- title: string
+- company: string (real company name)
+- companyBlurred: string (middle letters replaced with █)
+- location: string
+- salary: string
+- type: string (Full-time, Part-time, Contract, or Freelance)
+- tag: string (one of: Editor's Choice, Premium Pick, Rare Find, Featured, Recommended, Fast Filling)
+- description: string (2 sentences)
+- requirements: array of 3 strings
+- link: string (real URL)
+- featured: boolean
+- hiddenGem: boolean (true for exactly ONE job)
+
+Return ONLY the JSON array. No markdown, no backticks, no explanation.`
+    : `Today is ${today}. Search the web for the best paying jobs requiring ${language} language skills. Include ${language} teaching, translation, localization, corporate training, interpretation, content creation, and bilingual roles. Search globally. For every job find the actual direct URL. For companyBlurred replace middle letters with █. Set hiddenGem true for at most ONE job.
+
+Return a JSON array of up to 12 job objects (return [] if none found). Each object must have:
+- id: number
+- title: string
+- company: string
+- companyBlurred: string
+- location: string
+- salary: string
+- type: string
+- tag: string (one of: Editor's Choice, Premium Pick, Rare Find, Featured, Recommended, Fast Filling)
+- description: string
+- requirements: array of 3 strings
+- link: string
+- featured: boolean
+- hiddenGem: boolean
+
+Return ONLY the JSON array. No markdown, no backticks, no explanation.`;
 
   try {
+    // Use google_search grounding WITHOUT responseSchema (they can't be combined)
     const apiRes = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
@@ -112,10 +116,8 @@ export default async function handler(req, res) {
           contents: [{ parts: [{ text: prompt }] }],
           tools: [{ google_search: {} }],
           generationConfig: {
-            responseMimeType: "application/json",
-            responseSchema,
-            temperature: 0.7,
-            maxOutputTokens: 4000,
+            temperature: 0.4,
+            maxOutputTokens: 8192,
           },
         }),
       }
@@ -132,26 +134,36 @@ export default async function handler(req, res) {
     try { data = JSON.parse(rawText); }
     catch { return res.status(502).json({ jobs: [], debug: "Failed to parse Gemini response" }); }
 
-    const jsonText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const parts = data?.candidates?.[0]?.content?.parts || [];
+    const jsonText = parts.map(p => p.text || "").join("");
+
     if (!jsonText) {
-      console.error("No text in Gemini response:", JSON.stringify(data).slice(0, 300));
+      console.error("No text in Gemini response");
       return res.status(502).json({ jobs: [], debug: "Empty Gemini response" });
     }
 
+    // Extract JSON array - strip markdown fences if present
+    const stripped = jsonText.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+    const match = stripped.match(/\[[\s\S]*\]/);
+
+    if (!match) {
+      console.error("No JSON array found in:", jsonText.slice(0, 500));
+      return res.status(422).json({ jobs: [], debug: "No JSON array in response", preview: jsonText.slice(0, 300) });
+    }
+
     let rawJobs;
-    try { rawJobs = JSON.parse(jsonText); }
+    try { rawJobs = JSON.parse(match[0]); }
     catch (e) { return res.status(422).json({ jobs: [], debug: "JSON parse error: " + e.message }); }
 
-    // 2. Zod validation
+    // Zod validation with fallback cleaning
     const result = JobsArraySchema.safeParse(rawJobs);
-
     let jobs;
+
     if (result.success) {
       jobs = result.data;
       console.log(`Zod validation passed — ${jobs.length} jobs`);
     } else {
-      // Zod failed — clean and remap manually as fallback
-      console.warn("Zod validation failed, cleaning manually:", result.error.issues.slice(0, 3));
+      console.warn("Zod validation failed, cleaning manually");
       jobs = (Array.isArray(rawJobs) ? rawJobs : [])
         .filter(j => j && j.title && j.link)
         .map((j, i) => ({
@@ -164,7 +176,7 @@ export default async function handler(req, res) {
           type: String(j.type || "Full-time"),
           tag: String(j.tag || "Featured"),
           description: String(j.description || ""),
-          requirements: Array.isArray(j.requirements) ? j.requirements.slice(0, 3).map(String) : [],
+          requirements: Array.isArray(j.requirements) ? j.requirements.slice(0, 3).map(String) : ["See job listing"],
           link: String(j.link || "#"),
           featured: Boolean(j.featured),
           hiddenGem: Boolean(j.hiddenGem),
@@ -175,7 +187,6 @@ export default async function handler(req, res) {
       return res.status(200).json({ jobs: [] });
     }
 
-    // 3. Store in Redis cache
     await setInCache(cacheKey, jobs);
 
     res.setHeader("X-Cache", "MISS");
