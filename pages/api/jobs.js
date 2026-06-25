@@ -7,8 +7,6 @@ try {
   if (url.startsWith("https://") && token.length > 10) {
     redis = new Redis({ url, token });
     console.log("Redis initialized OK");
-  } else {
-    console.error("Redis env vars invalid — url:", url.slice(0, 30));
   }
 } catch (e) {
   console.error("Redis init failed:", e.message);
@@ -16,7 +14,20 @@ try {
 
 function getCacheKey(langCode) {
   const date = new Date().toISOString().split("T")[0];
-  return `esljd:v3:${langCode}:${date}`;
+  return `esljd:v4:${langCode}:${date}`;
+}
+
+// Attempt to repair common JSON issues Gemini produces
+function repairJSON(str) {
+  // Remove trailing commas before ] or }
+  let fixed = str
+    .replace(/,\s*]/g, "]")
+    .replace(/,\s*}/g, "}")
+    // Fix unescaped quotes inside strings (basic)
+    .replace(/:\s*"([^"]*)"([^,}\]]*)"([^"]*)"/, ': "$1$2$3"')
+    // Remove any trailing content after last ]
+    .replace(/\]\s*[^]*$/, "]");
+  return fixed;
 }
 
 export default async function handler(req, res) {
@@ -45,41 +56,30 @@ export default async function handler(req, res) {
   const isEnglish = langCode === "en";
 
   const prompt = isEnglish
-    ? `You are a JSON API. Return ONLY a valid JSON array, nothing else. No markdown, no backticks, no explanation, no bullet points, no text before or after the array.
+    ? `You are a JSON generator. Output ONLY a valid JSON array of 12 job objects. No markdown, no backticks, no comments, no trailing commas. Start with [ and end with ].
 
-Generate 12 realistic high-paying language career job listings. Use real companies: VIPKid, Preply, iTalki, Cambly, Berlitz, EPIK Korea, British Council, Teach Away, international schools in UAE/Korea/Japan/Thailand/Jordan, Arizona State University, Kaplan International. Include ESL teaching, business English coaching, translation, localization, IELTS prep, and bilingual roles.
+Each object must follow this exact structure (copy it exactly, replacing values):
+{"id":1,"title":"Senior ESL Instructor","company":"VIPKid","companyBlurred":"VIP███","location":"Remote","salary":"$22-26/hr","type":"Full-time","tag":"Editor's Choice","description":"Teach K-12 students across Asia using North American curriculum. Enjoy flexible hours and performance bonuses.","requirements":["TEFL or BA in Education","2+ years ESL experience","Native English speaker"],"link":"https://www.vipkid.com/teach","featured":true,"hiddenGem":false}
 
-The response must start with [ and end with ]. Each object has exactly these fields:
-{"id":1,"title":"Job Title","company":"Real Company","companyBlurred":"Re█████any","location":"City, Country or Remote","salary":"$25-35/hr","type":"Full-time","tag":"Editor's Choice","description":"First sentence about role. Second sentence about benefits.","requirements":["Requirement 1","Requirement 2","Requirement 3"],"link":"https://realcompany.com/careers","featured":true,"hiddenGem":false}
+Generate 12 unique jobs using real companies like VIPKid, Preply, iTalki, Cambly, Berlitz, EPIK, British Council, Teach Away, international schools in UAE/Korea/Japan/Thailand, US universities. Mix teaching, translation, localization, corporate training, IELTS prep, bilingual roles. One job must have hiddenGem:true.
 
-Rules:
-- companyBlurred: replace middle letters with █ (e.g. Preply becomes Pre███)
-- type: must be one of Full-time, Part-time, Contract, Freelance
-- tag: must be one of Editor's Choice, Premium Pick, Rare Find, Featured, Recommended, Fast Filling
-- hiddenGem: true for exactly ONE job, false for all others
-- link: real company website careers page
-- Return exactly 12 objects
-- START YOUR RESPONSE WITH [ AND END WITH ]`
-    : `You are a JSON API. Return ONLY a valid JSON array, nothing else. No markdown, no backticks, no explanation.
+CRITICAL: Valid JSON only. No trailing commas. No line breaks inside string values. Start with [ end with ].`
+    : `You are a JSON generator. Output ONLY a valid JSON array of job objects requiring ${language} skills. No markdown, no backticks, no comments, no trailing commas. Start with [ and end with ]. Return [] if no good results exist.
 
-Generate up to 12 realistic job listings requiring ${language} language skills. Include ${language} teaching, translation, localization, corporate training, interpretation, and bilingual roles at real companies.
+Each object: {"id":1,"title":"string","company":"string","companyBlurred":"string with middle letters as █","location":"string","salary":"string","type":"Full-time","tag":"Featured","description":"Two sentences.","requirements":["req1","req2","req3"],"link":"https://example.com","featured":false,"hiddenGem":false}
 
-The response must start with [ and end with ]. Each object:
-{"id":1,"title":"Job Title","company":"Real Company","companyBlurred":"Re█████any","location":"City or Remote","salary":"$X/hr","type":"Full-time","tag":"Featured","description":"Sentence one. Sentence two.","requirements":["Req 1","Req 2","Req 3"],"link":"https://company.com/careers","featured":false,"hiddenGem":false}
-
-If very few ${language} jobs exist, return a smaller array. If none, return [].
-START YOUR RESPONSE WITH [ AND END WITH ]`;
+CRITICAL: Valid JSON only. No trailing commas. Start with [ end with ].`;
 
   try {
     const apiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
-            temperature: 0.3,
+            temperature: 0.2,
             maxOutputTokens: 4096,
           },
         }),
@@ -101,29 +101,41 @@ START YOUR RESPONSE WITH [ AND END WITH ]`;
       return res.status(502).json({ jobs: [], debug: "Empty Gemini response" });
     }
 
-    // Aggressively extract JSON array
-    const clean = text
-      .replace(/```json\s*/gi, "")
-      .replace(/```\s*/g, "")
-      .trim();
-
-    // Find the first [ and last ]
+    // Extract JSON array
+    const clean = text.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
     const start = clean.indexOf("[");
     const end = clean.lastIndexOf("]");
 
     if (start === -1 || end === -1 || end <= start) {
-      console.error("No JSON array found in response:", text.slice(0, 400));
-      return res.status(422).json({ jobs: [], debug: "No JSON array", preview: text.slice(0, 300) });
+      console.error("No JSON array:", text.slice(0, 300));
+      return res.status(422).json({ jobs: [], debug: "No JSON array", preview: text.slice(0, 200) });
     }
 
-    const jsonStr = clean.slice(start, end + 1);
+    let jsonStr = clean.slice(start, end + 1);
 
+    // Try parsing, then try repair if it fails
     let jobs;
     try {
       jobs = JSON.parse(jsonStr);
-    } catch (e) {
-      console.error("JSON parse error:", e.message, jsonStr.slice(0, 200));
-      return res.status(422).json({ jobs: [], debug: "Parse error: " + e.message });
+    } catch (e1) {
+      console.warn("First parse failed, trying repair:", e1.message);
+      try {
+        jobs = JSON.parse(repairJSON(jsonStr));
+        console.log("Repair succeeded");
+      } catch (e2) {
+        console.error("Repair also failed:", e2.message);
+        // Last resort: extract individual job objects
+        const jobMatches = jsonStr.match(/\{[^{}]*"title"[^{}]*\}/g);
+        if (jobMatches && jobMatches.length > 0) {
+          jobs = jobMatches.reduce((acc, match) => {
+            try { acc.push(JSON.parse(match)); } catch {}
+            return acc;
+          }, []);
+          console.log(`Extracted ${jobs.length} jobs individually`);
+        } else {
+          return res.status(422).json({ jobs: [], debug: "Could not parse JSON: " + e2.message });
+        }
+      }
     }
 
     if (!Array.isArray(jobs) || jobs.length === 0) {
@@ -150,8 +162,12 @@ START YOUR RESPONSE WITH [ AND END WITH ]`;
         hiddenGem: Boolean(j.hiddenGem),
       }));
 
+    if (cleaned.length === 0) {
+      return res.status(200).json({ jobs: [] });
+    }
+
     // CACHE FOR 20 HOURS
-    if (redis && cleaned.length > 0) {
+    if (redis) {
       try {
         await redis.setex(cacheKey, 72000, JSON.stringify(cleaned));
         console.log(`Cached ${cleaned.length} jobs for ${langCode}`);
