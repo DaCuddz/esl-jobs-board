@@ -371,16 +371,27 @@ function CommunityPage({ onUnlock, isUnlocked, jobs, onNavigateHome }) {
     } catch {}
   };
 
+  const doPost = async (id) => {
+    const text = message.trim();
+    if (!text) return;
+    setSubmitting(true);
+    try {
+      const r = await fetch("/api/community?action=post", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ user: id.user, flag: id.flag, text }) });
+      const d = await r.json();
+      if (d.post) {
+        setPosts(p => [d.post, ...p]);
+        setLikes(l => ({ ...l, [d.post.id]: 0 }));
+        setReplies(rv => ({ ...rv, [d.post.id]: [] }));
+        setMessage("");
+      }
+    } catch(e) { console.error("Post failed:", e.message); }
+    setSubmitting(false);
+  };
+
   const handlePost = async () => {
     if (!message.trim() || submitting) return;
     if (identity.auto) { setShowIdentity(true); return; }
-    setSubmitting(true);
-    try {
-      const r = await fetch("/api/community?action=post", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ user: identity.user, flag: identity.flag, text: message.trim() }) });
-      const d = await r.json();
-      if (d.post) { setPosts(p => [d.post, ...p]); setLikes(l => ({ ...l, [d.post.id]: 0 })); setReplies(r => ({ ...r, [d.post.id]: [] })); setMessage(""); }
-    } catch {}
-    setSubmitting(false);
+    await doPost(identity);
   };
 
   const handleReply = async (postId) => {
@@ -401,7 +412,7 @@ function CommunityPage({ onUnlock, isUnlocked, jobs, onNavigateHome }) {
 
   return (
     <>
-      {showIdentity && <IdentityModal onSave={(id) => { setIdentity(id); setShowIdentity(false); }} />}
+      {showIdentity && <IdentityModal onSave={async (id) => { setIdentity(id); setShowIdentity(false); if (message.trim()) { await doPost(id); } }} />}
       <div style={{ maxWidth:1080, margin:"0 auto", padding:"0 24px 100px" }}>
         <div style={{ paddingTop:40, paddingBottom:36 }}>
           <button onClick={onNavigateHome} style={{ background:"transparent", border:"none", color:"#3a3020", fontSize:12, fontFamily:"monospace", cursor:"pointer", marginBottom:20, display:"flex", alignItems:"center", gap:6 }}>← Back to Opportunities</button>
